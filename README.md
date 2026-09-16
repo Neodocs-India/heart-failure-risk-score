@@ -1,16 +1,21 @@
 # Indian HF App — Heart Failure Risk Calculator
 
-A single-page form that collects the heart-failure parameters laid out in the
-`HF_App` specification and turns them into a 100-point risk score with a
-Green / Yellow / Orange / Red zone, outcome-specific sub-risks, action points
-and a follow-up reminder message.
+A mobile-first, guided questionnaire that collects the heart-failure parameters
+laid out in the `HF_App` specification and turns them into a 100-point risk
+score with a Green / Yellow / Orange / Red zone, outcome-specific sub-risks,
+action points and a follow-up reminder.
+
+Questions are asked **one screen at a time** — a single question, or a tight
+cluster that belongs together (height + weight, BP + pulse). Choices are large
+tap targets that advance by themselves; long checklists become one
+"select all that apply" screen. The score appears only at the end.
 
 No build step, no backend, no dependencies — open `index.html` in a browser, or
 serve the folder:
 
 ```sh
 npm run serve      # http://localhost:8080
-npm test           # scoring engine unit tests (node --test)
+npm test           # scoring + flow unit tests (node --test)
 ```
 
 ## What it captures
@@ -35,6 +40,24 @@ Two fields go beyond the deck because the score is weaker without them: **NYHA
 class** (symptom severity) and **QRS duration / LBBB** (without them CRT
 candidacy cannot be assessed).
 
+## The flow
+
+33 question screens, plus a short divider before each section so the user knows
+where they are. Two are conditional: the date of the last admission is only
+asked once an admission is recorded, and LBBB is skipped once a narrow QRS has
+been entered — the progress denominator follows suit.
+
+- **Nothing is mandatory.** The primary button reads *Skip* on an optional
+  question left blank, so a lab panel that was never ordered costs four taps.
+- **Numbers are range-checked** before the screen advances, so a mistyped
+  age of 400 is refused rather than scored.
+- **Answers persist as you go** (`localStorage`), so a reload or a lock screen
+  resumes on the same question.
+- **Keyboard works too**: `Enter` advances, and letter keys pick the lettered
+  options — useful when the same clinician enters many patients at a desk.
+- The `⋮` menu jumps straight to the score, loads a sample patient, exports or
+  imports answers as JSON, or starts over.
+
 ## How the score behaves
 
 - **Medication is scored as a gap.** Points are added for guideline-directed
@@ -57,9 +80,10 @@ traced back to the inputs that produced it.
 
 ## Saving and sharing
 
-Entries are kept in `localStorage` as you type. *Export JSON* writes the values
-plus the computed result to a file, *Import JSON* reads one back, and *Print*
-produces a one-patient summary with the breakdown expanded.
+Answers are kept in `localStorage` as you go. From the menu, *Export JSON*
+writes the values plus the computed result to a file and *Import JSON* reads one
+back (jumping straight to its score). On the result screen, *Print* produces a
+one-patient summary with the breakdown expanded.
 
 ## Not built yet
 
@@ -75,15 +99,19 @@ for this static app:
 ## Layout
 
 ```
-index.html          markup and the result panel
-assets/schema.js    field definitions — the form is rendered from this
+index.html          app shell — app bar, stage, footer, menu sheet
+assets/schema.js    field definitions: type, units, ranges
+assets/flow.js      the question flow: what is asked, when, and how it is worded
 assets/scoring.js   scoring engine (pure, no DOM, unit-tested)
-assets/app.js       rendering, state, export/import, reminders
-assets/styles.css   styling, including print rules
-tests/              node --test suite for the scoring engine
+assets/app.js       flow controller — rendering, navigation, state
+assets/result.js    the final score screen
+assets/styles.css   mobile-first styling, dark mode and print rules
+tests/              node --test suites for the scoring engine and the flow
 ```
 
-Adding a parameter means one entry in `schema.js` and one rule in `scoring.js`.
+Adding a parameter means one entry in `schema.js`, one rule in `scoring.js`, and
+one step in `flow.js`. A test asserts that every scored field is asked exactly
+once, so a parameter cannot be silently dropped from the questionnaire.
 
 ## Disclaimer
 

@@ -1,321 +1,390 @@
-/** UI layer: renders the form from the schema and re-scores on every change. */
+/**
+ * Flow controller: shows one step at a time, keeps the answers, and hands over
+ * to the result screen at the end.
+ */
 
-import { SECTIONS, PATIENT_FIELDS, emptyValues } from './schema.js';
-import { score, followUpDate, bmiOf } from './scoring.js';
+import { emptyValues } from './schema.js';
+import { score } from './scoring.js';
+import { STEPS, visibleSteps, progressOf, fieldById } from './flow.js';
+import { renderResult } from './result.js';
 
-const STORAGE_KEY = 'hf-app.draft.v1';
-const form = document.getElementById('hf-form');
-const patientGrid = document.getElementById('patient-fields');
+const STORAGE_KEY = 'hf-app.session.v2';
 
-let values = loadDraft() ?? emptyValues();
+const stage = document.getElementById('stage');
+const footer = document.getElementById('footer');
+const backButton = document.getElementById('btn-back');
+const primaryButton = document.getElementById('btn-primary');
+const progressFill = document.getElementById('progress-fill');
+const sectionLabel = document.getElementById('section-label');
+const sheet = document.getElementById('menu-sheet');
 
-/* --------------------------------------------------------------- render */
+const el = (tag, className, text) => {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+};
 
-function fieldNode(field) {
-  const wrap = document.createElement('div');
-  wrap.className = field.type === 'bool' ? 'field field-bool' : 'field';
+let state = restore() ?? { values: emptyValues(), currentId: STEPS[0].id, answered: [] };
+let answered = new Set(state.answered);
+let direction = 'forward';
 
-  const inputId = `f-${field.id}`;
-  const label = document.createElement('label');
-  label.htmlFor = inputId;
-  label.textContent = field.unit ? `${field.label} (${field.unit})` : field.label;
+const currentStep = () => STEPS.find((step) => step.id === state.currentId) ?? STEPS[0];
 
-  let input;
-  if (field.type === 'select') {
-    input = document.createElement('select');
-    for (const [value, text] of field.options) {
-      const option = document.createElement('option');
-      option.value = value;
-      option.textContent = text;
-      input.appendChild(option);
+/* ------------------------------------------------------------ navigation */
+
+function goTo(stepId, how = 'forward') {
+  direction = how;
+  state.currentId = stepId;
+  persist();
+  render();
+}
+
+function step(offset) {
+  const list = visibleSteps(state.values);
+  const index = list.findIndex((s) => s.id === state.currentId);
+  const target = list[index + offset];
+  if (!target) return;
+  goTo(target.id, offset > 0 ? 'forward' : 'back');
+}
+
+function next() {
+  if (!validate()) return;
+  step(1);
+}
+
+/* ------------------------------------------------------------ validation */
+
+let validators = [];
+
+function validate() {
+  const errorNode = document.getElementById('step-error');
+  for (const check of validators) {
+    const message = check();
+    if (message) {
+      if (errorNode) errorNode.textContent = message;
+      return false;
     }
-  } else {
-    input = document.createElement('input');
-    input.type = field.type === 'bool' ? 'checkbox'
-      : field.type === 'number' ? 'number'
-      : field.type === 'date' ? 'date' : 'text';
+  }
+  if (errorNode) errorNode.textContent = '';
+  return true;
+}
+
+/* --------------------------------------------------------- input widgets */
+
+/** Big tappable option buttons, lettered like a quiz. */
+function optionList(options, isSelected, onPick) {
+  const list = el('div', 'options');
+  options.forEach(([value, label], index) => {
+    const button = el('button', 'option');
+    button.type = 'button';
+    button.append(
+      el('span', 'option-key', String.fromCharCode(65 + index)),
+      el('span', 'option-label', label),
+    );
+    if (isSelected(value)) button.classList.add('selected');
+    button.addEventListener('click', () => onPick(value, button));
+    list.appendChild(button);
+  });
+  return list;
+}
+
+/** Choosing an option answers the question, so move on by itself. */
+function pickAndAdvance(list, button) {
+  for (const other of list.querySelectorAll('.option')) other.classList.remove('selected');
+  button.classList.add('selected');
+  setTimeout(() => next(), 180);
+}
+
+function textInput(field) {
+  const input = el('input');
+  input.id = `f-${field.id}`;
+  input.value = state.values[field.id] ?? '';
+  if (field.type === 'number') {
+    input.type = 'number';
+    input.inputMode = field.step && field.step < 1 ? 'decimal' : 'numeric';
     if (field.min !== undefined) input.min = field.min;
     if (field.max !== undefined) input.max = field.max;
     if (field.step !== undefined) input.step = field.step;
+  } else if (field.type === 'date') {
+    input.type = 'date';
+  } else {
+    input.type = 'text';
     if (field.placeholder) input.placeholder = field.placeholder;
   }
-  input.id = inputId;
-  input.name = field.id;
-  input.dataset.fieldId = field.id;
+  input.addEventListener('input', () => {
+    state.values[field.id] = input.value;
+    answered.add(field.id);
+    persist();
+    updatePrimaryLabel();
+    const bmi = document.getElementById('bmi-live');
+    if (bmi) bmi.textContent = bmiText();
+  });
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') { event.preventDefault(); next(); }
+  });
 
-  if (field.type === 'bool') {
-    wrap.append(input, label);
-  } else {
-    wrap.append(label, input);
-    if (field.ref) {
-      const ref = document.createElement('span');
-      ref.className = 'ref';
-      ref.textContent = `Normal: ${field.ref}`;
-      wrap.appendChild(ref);
-    }
-  }
-  return wrap;
+  validators.push(() => {
+    const raw = input.value.trim();
+    if (raw === '' || field.type !== 'number') return null;
+    const value = Number(raw);
+    if (!Number.isFinite(value)) return `${field.label} must be a number.`;
+    if (field.min !== undefined && value < field.min) return `${field.label} looks too low — expected ${field.min}–${field.max}.`;
+    if (field.max !== undefined && value > field.max) return `${field.label} looks too high — expected ${field.min}–${field.max}.`;
+    return null;
+  });
+  return input;
 }
 
-function renderForm() {
-  for (const field of PATIENT_FIELDS) patientGrid.appendChild(fieldNode(field));
-
-  for (const section of SECTIONS) {
-    const card = document.createElement('section');
-    card.className = 'card';
-    card.id = `section-${section.id}`;
-
-    const head = document.createElement('div');
-    head.className = 'card-head';
-    const title = document.createElement('h2');
-    title.textContent = section.title;
-    const badge = document.createElement('span');
-    badge.className = 'section-score';
-    badge.id = `section-score-${section.id}`;
-    badge.textContent = `0 / ${section.max}`;
-    head.append(title, badge);
-    card.appendChild(head);
-
-    if (section.note) {
-      const note = document.createElement('p');
-      note.className = 'section-note';
-      note.textContent = section.note;
-      card.appendChild(note);
-    }
-
-    const grid = document.createElement('div');
-    grid.className = 'field-grid';
-    for (const field of section.fields) grid.appendChild(fieldNode(field));
-
-    if (section.id === 'history') {
-      const bmi = document.createElement('p');
-      bmi.className = 'bmi-readout';
-      bmi.id = 'bmi-readout';
-      grid.appendChild(bmi);
-    }
-
-    card.appendChild(grid);
-    form.appendChild(card);
-  }
+function bmiText() {
+  const h = Number(state.values.heightCm);
+  const w = Number(state.values.weightKg);
+  if (!h || !w) return 'BMI appears once both are entered.';
+  return `BMI ${(w / ((h / 100) ** 2)).toFixed(1)} kg/m²`;
 }
 
-/* --------------------------------------------------------- form <-> state */
+/* ------------------------------------------------------------- rendering */
 
-function writeToForm() {
-  for (const [id, value] of Object.entries(values)) {
-    const input = form.querySelector(`[data-field-id="${CSS.escape(id)}"]`);
-    if (!input) continue;
-    if (input.type === 'checkbox') input.checked = Boolean(value);
-    else input.value = value ?? '';
-  }
-}
+function renderQuestion(stepDef) {
+  const body = el('div', 'step-body');
+  const fields = stepDef.fields.map(fieldById);
+  const single = fields.length === 1 ? fields[0] : null;
 
-function readFromForm() {
-  for (const input of form.querySelectorAll('[data-field-id]')) {
-    values[input.dataset.fieldId] = input.type === 'checkbox' ? input.checked : input.value;
-  }
-}
-
-/* ------------------------------------------------------------- results */
-
-const ZONE_COLOR = {
-  green: 'var(--green)', yellow: 'var(--yellow)',
-  orange: 'var(--orange)', red: 'var(--red)',
-};
-
-function colorForPercent(percent) {
-  if (percent >= 65) return 'var(--red)';
-  if (percent >= 45) return 'var(--orange)';
-  if (percent >= 25) return 'var(--yellow)';
-  return 'var(--green)';
-}
-
-function bar(percent) {
-  const outer = document.createElement('div');
-  outer.className = 'bar';
-  const fill = document.createElement('span');
-  fill.style.width = `${Math.max(0, Math.min(100, percent))}%`;
-  fill.style.background = colorForPercent(percent);
-  outer.appendChild(fill);
-  return outer;
-}
-
-function renderResult(result) {
-  document.getElementById('score-total').textContent = result.total;
-
-  const badge = document.getElementById('zone-badge');
-  badge.textContent = `${result.zone.label} zone`;
-  badge.className = `zone-badge ${result.zone.id}`;
-  document.getElementById('zone-summary').textContent = result.zone.summary;
-  document.getElementById('zone-marker').style.left = `${result.total}%`;
-
-  const c = result.completeness;
-  document.getElementById('completeness').textContent =
-    `Data completeness ${c.percent}% (${c.filled}/${c.total} key inputs)`;
-
-  const bmi = bmiOf(values);
-  document.getElementById('bmi-readout').textContent =
-    bmi === null ? 'Enter height and weight to calculate BMI.' : `BMI ${bmi.toFixed(1)} kg/m²`;
-
-  for (const section of SECTIONS) {
-    const domain = result.domains[section.id];
-    document.getElementById(`section-score-${section.id}`).textContent =
-      `${domain.points} / ${domain.max}`;
+  if (single && single.type === 'bool') {
+    const list = optionList(
+      [['yes', 'Yes'], ['no', 'No']],
+      (value) => answered.has(single.id) && (value === 'yes') === Boolean(state.values[single.id]),
+      (value, button) => {
+        state.values[single.id] = value === 'yes';
+        answered.add(single.id);
+        persist();
+        pickAndAdvance(list, button);
+      },
+    );
+    body.appendChild(list);
+    return body;
   }
 
-  const subRisks = document.getElementById('sub-risks');
-  subRisks.replaceChildren(...result.subRisks.map((risk) => {
-    const row = document.createElement('div');
-    row.className = 'subrisk';
-    const top = document.createElement('div');
-    top.className = 'subrisk-top';
-    top.innerHTML = `<span></span><b></b>`;
-    top.firstChild.textContent = risk.label;
-    top.lastChild.textContent = `${risk.value}%`;
-    row.append(top, bar(risk.value));
-    return row;
-  }));
-
-  const flagsCard = document.getElementById('flags-card');
-  const flagList = document.getElementById('flags');
-  flagsCard.hidden = result.flags.length === 0;
-  flagList.replaceChildren(...result.flags.map((flag) => {
-    const li = document.createElement('li');
-    li.className = flag.level;
-    li.textContent = flag.text;
-    return li;
-  }));
-
-  const domains = document.getElementById('domains');
-  domains.replaceChildren(...SECTIONS.map((section) => {
-    const domain = result.domains[section.id];
-    const row = document.createElement('div');
-    row.className = 'domain-row';
-    const top = document.createElement('div');
-    top.className = 'domain-top';
-    top.innerHTML = '<span></span><span></span>';
-    top.firstChild.textContent = section.title;
-    top.lastChild.textContent = `${domain.points} / ${domain.max}`;
-    row.append(top, bar(domain.percent));
-    return row;
-  }));
-
-  renderBreakdown(result);
-  renderReminder(result);
-}
-
-function renderBreakdown(result) {
-  const container = document.getElementById('breakdown');
-  container.replaceChildren(...SECTIONS.map((section) => {
-    const group = document.createElement('div');
-    group.className = 'breakdown-group';
-    const heading = document.createElement('h3');
-    heading.textContent = section.title;
-    group.appendChild(heading);
-    for (const item of result.items.filter((i) => i.domain === section.id)) {
-      const row = document.createElement('div');
-      row.className = item.points === 0 ? 'breakdown-row zero' : 'breakdown-row';
-      const left = document.createElement('span');
-      left.textContent = item.label;
-      if (item.detail) {
-        const detail = document.createElement('em');
-        detail.textContent = ` — ${item.detail}`;
-        left.appendChild(detail);
-      }
-      const right = document.createElement('b');
-      right.textContent = `${item.points} / ${item.max}`;
-      row.append(left, right);
-      group.appendChild(row);
-    }
-    return group;
-  }));
-}
-
-function reminderMessage(result) {
-  const due = followUpDate(result.zone).toISOString().slice(0, 10);
-  const name = values.patientName || 'Patient';
-  const lines = [
-    `Dear ${name},`,
-    '',
-    `Your heart-failure risk assessment on ${values.visitDate || new Date().toISOString().slice(0, 10)}`,
-    `scored ${result.total}/100 — ${result.zone.label} zone (${result.zone.summary}).`,
-    '',
-    `Please book your next review on or before ${due}.`,
-  ];
-  if (result.flags.length) {
-    lines.push('', 'Points your clinician flagged:');
-    for (const flag of result.flags) lines.push(`  • ${flag.text}`);
+  if (single && single.type === 'select') {
+    const options = single.options.filter(([value]) => value !== '');
+    const list = optionList(
+      options,
+      (value) => state.values[single.id] === value,
+      (value, button) => {
+        state.values[single.id] = value;
+        answered.add(single.id);
+        persist();
+        pickAndAdvance(list, button);
+      },
+    );
+    body.appendChild(list);
+    return body;
   }
-  lines.push(
-    '',
-    'Continue your prescribed medicines, weigh yourself daily, and seek urgent',
-    'care for breathlessness at rest, rapid weight gain or fainting.',
-    '',
-    '— Indian HF App',
+
+  if (single && stepDef.quick) {
+    const list = optionList(
+      stepDef.quick,
+      (value) => String(state.values[single.id]) === value,
+      (value, button) => {
+        state.values[single.id] = value;
+        answered.add(single.id);
+        persist();
+        pickAndAdvance(list, button);
+      },
+    );
+    body.appendChild(list);
+
+    const exact = el('div', 'field');
+    exact.append(el('label', null, 'Or enter the exact number'), textInput(single));
+    exact.querySelector('label').htmlFor = `f-${single.id}`;
+    body.appendChild(exact);
+    return body;
+  }
+
+  const grid = el('div', fields.length > 1 ? 'field-grid' : 'field-grid single');
+  for (const field of fields) {
+    const wrap = el('div', 'field');
+    const label = el('label', null, field.unit ? `${field.label} (${field.unit})` : field.label);
+    label.htmlFor = `f-${field.id}`;
+    wrap.append(label, textInput(field));
+    if (field.ref) wrap.appendChild(el('span', 'ref', `Normal ${field.ref}`));
+    grid.appendChild(wrap);
+  }
+  body.appendChild(grid);
+
+  if (stepDef.showBmi) {
+    const readout = el('p', 'bmi-live', bmiText());
+    readout.id = 'bmi-live';
+    body.appendChild(readout);
+  }
+  return body;
+}
+
+function renderMulti(stepDef) {
+  const body = el('div', 'step-body');
+  const chips = el('div', 'chips');
+  for (const field of stepDef.fields.map(fieldById)) {
+    const chip = el('button', 'chip');
+    chip.type = 'button';
+    chip.append(el('span', 'chip-box'), el('span', null, field.label));
+    if (state.values[field.id]) chip.classList.add('selected');
+    chip.addEventListener('click', () => {
+      state.values[field.id] = !state.values[field.id];
+      answered.add(field.id);
+      chip.classList.toggle('selected', Boolean(state.values[field.id]));
+      persist();
+    });
+    chips.appendChild(chip);
+  }
+  body.appendChild(chips);
+  body.appendChild(el('p', 'chip-hint', 'Leave everything unselected if none apply.'));
+  return body;
+}
+
+function renderWelcome() {
+  const body = el('div', 'step-body welcome');
+  body.append(
+    el('p', 'welcome-kicker', 'Indian HF App'),
+    el('h1', 'welcome-title', 'Heart Failure Risk Assessment'),
+    el('p', 'welcome-blurb',
+      'A few questions at a time — history, symptoms, signs, labs, imaging and treatment. '
+      + 'You get a 0–100 risk score with a colour zone and follow-up plan at the end.'),
+    el('p', 'welcome-meta', 'About 4 minutes · answers are saved on this device as you go'),
   );
-  return { text: lines.join('\n'), due };
+  const sample = el('button', 'btn ghost', 'Fill with a sample patient');
+  sample.type = 'button';
+  sample.addEventListener('click', loadSample);
+  body.appendChild(sample);
+  body.appendChild(el('p', 'fine-print disclaimer',
+    'Not a medical device. The weighting is a transparent internal scheme, not a '
+    + 'validated published model, and does not replace clinical judgement.'));
+  return body;
 }
 
-function renderReminder(result) {
-  const { text, due } = reminderMessage(result);
-  document.getElementById('followup').textContent =
-    `Next review due ${due} (${result.zone.followUpDays} days — ${result.zone.label} zone).`;
-  document.getElementById('reminder-text').value = text;
-
-  const mail = document.getElementById('btn-mail');
-  const subject = `HF follow-up reminder — review due ${due}`;
-  mail.href = `mailto:${encodeURIComponent(values.contactEmail || '')}`
-    + `?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(text)}`;
+function renderSection(stepDef) {
+  const body = el('div', 'step-body section-intro');
+  body.append(
+    el('p', 'section-kicker', 'Next section'),
+    el('h1', 'section-title', stepDef.title),
+    el('p', 'section-blurb', stepDef.blurb),
+  );
+  return body;
 }
 
-/* ------------------------------------------------------------ lifecycle */
+function render() {
+  const stepDef = currentStep();
+  validators = [];
 
-function refresh() {
-  renderResult(score(values));
-  saveDraft();
+  const screen = el('div', `screen enter-${direction}`);
+  const isResult = stepDef.kind === 'result';
+
+  if (stepDef.kind === 'question' || stepDef.kind === 'multi') {
+    const progress = progressOf(stepDef.id, state.values);
+    // The app bar already carries the section name, so this line only numbers.
+    screen.appendChild(el('p', 'step-meta',
+      `Question ${progress.position} of ${progress.total}`));
+    screen.appendChild(el('h1', 'step-title', stepDef.title));
+    if (stepDef.hint) screen.appendChild(el('p', 'step-hint', stepDef.hint));
+    screen.appendChild(stepDef.kind === 'multi' ? renderMulti(stepDef) : renderQuestion(stepDef));
+    const error = el('p', 'step-error');
+    error.id = 'step-error';
+    screen.appendChild(error);
+  } else if (stepDef.kind === 'welcome') {
+    screen.appendChild(renderWelcome());
+  } else if (stepDef.kind === 'section') {
+    screen.appendChild(renderSection(stepDef));
+  } else {
+    screen.appendChild(renderResult(state.values, {
+      onReview: () => goTo(STEPS[1].id, 'back'),
+      onRestart: restart,
+      onExport: exportJson,
+    }));
+  }
+
+  stage.replaceChildren(screen);
+  stage.scrollTop = 0;
+  window.scrollTo(0, 0);
+
+  document.body.classList.toggle('on-result', isResult);
+  footer.hidden = isResult;
+  updateHeader(stepDef);
+  updatePrimaryLabel();
+
+  const list = visibleSteps(state.values);
+  backButton.disabled = list.findIndex((s) => s.id === stepDef.id) === 0;
+
+  const focusTarget = screen.querySelector('input:not([type=hidden])');
+  if (focusTarget && stepDef.kind === 'question') focusTarget.focus({ preventScroll: true });
 }
 
-function saveDraft() {
+function updateHeader(stepDef) {
+  const list = visibleSteps(state.values);
+  const index = list.findIndex((s) => s.id === stepDef.id);
+  const percent = Math.round((index / Math.max(1, list.length - 1)) * 100);
+  progressFill.style.width = `${percent}%`;
+
+  sectionLabel.textContent = stepDef.kind === 'result' ? 'Result' : (stepDef.section ?? stepDef.title ?? '');
+}
+
+/** "Skip" reads better than "Next" on an optional question left blank. */
+function updatePrimaryLabel() {
+  const stepDef = currentStep();
+  if (stepDef.kind === 'welcome') { primaryButton.textContent = 'Start'; return; }
+  if (stepDef.kind === 'section') { primaryButton.textContent = 'Continue'; return; }
+
+  const list = visibleSteps(state.values);
+  const isLast = list[list.length - 2]?.id === stepDef.id;
+  if (isLast) { primaryButton.textContent = 'See my score'; return; }
+
+  const blank = (stepDef.fields ?? []).every((id) => {
+    const value = state.values[id];
+    return value === '' || value === undefined || value === null || value === false;
+  });
+  primaryButton.textContent = stepDef.optional && blank ? 'Skip' : 'Next';
+}
+
+/* ---------------------------------------------------------- persistence */
+
+function persist() {
+  state.answered = [...answered];
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(values));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   } catch {
-    /* private mode or quota — the form still works, it just will not persist */
+    /* private mode or quota — the flow still works, it just will not resume */
   }
 }
 
-function loadDraft() {
+function restore() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
-    return { ...emptyValues(), ...JSON.parse(raw) };
+    const parsed = JSON.parse(raw);
+    if (!parsed?.values) return null;
+    return {
+      values: { ...emptyValues(), ...parsed.values },
+      currentId: STEPS.some((s) => s.id === parsed.currentId) ? parsed.currentId : STEPS[0].id,
+      answered: Array.isArray(parsed.answered) ? parsed.answered : [],
+    };
   } catch {
     return null;
   }
 }
 
-/* --------------------------------------------------------------- events */
+function restart() {
+  if (!confirm('Clear every answer and start a new assessment?')) return;
+  state = { values: emptyValues(), currentId: STEPS[0].id, answered: [] };
+  answered = new Set();
+  persist();
+  goTo(STEPS[0].id, 'back');
+}
 
-form.addEventListener('input', () => { readFromForm(); refresh(); });
-form.addEventListener('change', () => { readFromForm(); refresh(); });
-form.addEventListener('submit', (event) => event.preventDefault());
+/* --------------------------------------------------------------- export */
 
-document.getElementById('btn-reset').addEventListener('click', () => {
-  if (!confirm('Clear the form and start a new assessment?')) return;
-  values = emptyValues();
-  writeToForm();
-  refresh();
-});
-
-document.getElementById('btn-print').addEventListener('click', () => {
-  document.querySelector('.breakdown').open = true;
-  window.print();
-});
-
-document.getElementById('btn-export').addEventListener('click', () => {
-  const result = score(values);
+function exportJson() {
+  const result = score(state.values);
   const payload = {
     exportedAt: new Date().toISOString(),
-    values,
+    values: state.values,
     result: {
       total: result.total,
       zone: result.zone.id,
@@ -328,42 +397,22 @@ document.getElementById('btn-export').addEventListener('click', () => {
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
   const link = document.createElement('a');
   link.href = URL.createObjectURL(blob);
-  link.download = `hf-assessment-${values.patientId || 'unnamed'}-${new Date().toISOString().slice(0, 10)}.json`;
+  link.download = `hf-assessment-${state.values.patientId || 'unnamed'}-${new Date().toISOString().slice(0, 10)}.json`;
   link.click();
   URL.revokeObjectURL(link.href);
-});
+}
 
-const fileInput = document.getElementById('file-import');
-document.getElementById('btn-import').addEventListener('click', () => fileInput.click());
-fileInput.addEventListener('change', async () => {
-  const file = fileInput.files?.[0];
-  if (!file) return;
-  try {
-    const parsed = JSON.parse(await file.text());
-    values = { ...emptyValues(), ...(parsed.values ?? parsed) };
-    writeToForm();
-    refresh();
-  } catch {
-    alert('That file could not be read as a saved assessment.');
-  }
-  fileInput.value = '';
-});
+function importJson(file) {
+  file.text().then((raw) => {
+    const parsed = JSON.parse(raw);
+    state.values = { ...emptyValues(), ...(parsed.values ?? parsed) };
+    answered = new Set(Object.keys(state.values));
+    goTo('result', 'forward');
+  }).catch(() => alert('That file could not be read as a saved assessment.'));
+}
 
-document.getElementById('btn-copy').addEventListener('click', async () => {
-  const button = document.getElementById('btn-copy');
-  const text = document.getElementById('reminder-text').value;
-  try {
-    await navigator.clipboard.writeText(text);
-  } catch {
-    document.getElementById('reminder-text').select();
-    document.execCommand('copy');
-  }
-  button.textContent = 'Copied';
-  setTimeout(() => { button.textContent = 'Copy message'; }, 1500);
-});
-
-document.getElementById('btn-sample').addEventListener('click', () => {
-  values = {
+function loadSample() {
+  state.values = {
     ...emptyValues(),
     patientName: 'Sample Patient', patientId: 'DEMO-001',
     visitDate: new Date().toISOString().slice(0, 10),
@@ -372,7 +421,7 @@ document.getElementById('btn-sample').addEventListener('click', () => {
     cardiomyopathy: 'ischemic',
     htn: true, dm: true, ckd: true, af: true,
     nyha: '3', fatigability: true, swelling: true, sleep: true, appetite: true,
-    pedalOedema: 'moderate', ascites: false, afDocumented: true,
+    pedalOedema: 'moderate', afDocumented: true,
     sbp: '104', dbp: '68', hr: '96', fluctuatingBP: true,
     hb: '10.8', totalCholesterol: '186', creatinine: '1.6', uacr: '120',
     sodium: '132', potassium: '5.1', uricAcid: '8.2', hba1c: '8.4',
@@ -380,12 +429,50 @@ document.getElementById('btn-sample').addEventListener('click', () => {
     cardiomegaly: true, ef: '30', mr: 'moderate', tr: 'mild',
     laSize: '47', qrs: '142', rhythm: 'af', lbbb: false,
     hhfLastYear: '2',
-    renin: true, betaBlocker: true, sglt2i: false, mra: false, vaccination: false,
+    renin: true, betaBlocker: true,
   };
-  writeToForm();
-  refresh();
+  answered = new Set(Object.keys(state.values));
+  goTo('result', 'forward');
+}
+
+/* --------------------------------------------------------------- events */
+
+primaryButton.addEventListener('click', next);
+backButton.addEventListener('click', () => step(-1));
+
+document.addEventListener('keydown', (event) => {
+  if (sheet.open) {
+    if (event.key === 'Escape') sheet.close();
+    return;
+  }
+  const stepDef = currentStep();
+  if (event.key === 'Enter' && event.target.tagName !== 'BUTTON' && event.target.tagName !== 'TEXTAREA') {
+    event.preventDefault();
+    next();
+    return;
+  }
+  // Letter keys pick an option, the way the badges suggest.
+  if (/^[a-z]$/i.test(event.key) && event.target.tagName !== 'INPUT' && event.target.tagName !== 'TEXTAREA') {
+    const options = [...stage.querySelectorAll('.option')];
+    const target = options[event.key.toLowerCase().charCodeAt(0) - 97];
+    if (target) target.click();
+  }
 });
 
-renderForm();
-writeToForm();
-refresh();
+document.getElementById('btn-menu').addEventListener('click', () => sheet.showModal());
+sheet.addEventListener('click', (event) => { if (event.target === sheet) sheet.close(); });
+document.getElementById('menu-close').addEventListener('click', () => sheet.close());
+document.getElementById('menu-result').addEventListener('click', () => { sheet.close(); goTo('result', 'forward'); });
+document.getElementById('menu-restart').addEventListener('click', () => { sheet.close(); restart(); });
+document.getElementById('menu-export').addEventListener('click', () => { sheet.close(); exportJson(); });
+document.getElementById('menu-sample').addEventListener('click', () => { sheet.close(); loadSample(); });
+
+const fileInput = document.getElementById('file-import');
+document.getElementById('menu-import').addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', () => {
+  const file = fileInput.files?.[0];
+  if (file) importJson(file);
+  fileInput.value = '';
+});
+
+render();
