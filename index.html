@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Indian HF App — Heart Failure Risk Calculator</title>
+<link rel="stylesheet" href="assets/styles.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="topbar-inner">
+    <div>
+      <h1>Indian HF App</h1>
+      <p class="tagline">Diagnosis · Risk calculator · Prognosis</p>
+    </div>
+    <div class="topbar-actions">
+      <button type="button" id="btn-sample" class="ghost">Load sample</button>
+      <button type="button" id="btn-export" class="ghost">Export JSON</button>
+      <button type="button" id="btn-import" class="ghost">Import JSON</button>
+      <button type="button" id="btn-print" class="ghost">Print</button>
+      <button type="button" id="btn-reset" class="ghost danger">Reset</button>
+      <input type="file" id="file-import" accept="application/json" hidden>
+    </div>
+  </div>
+</header>
+
+<main class="layout">
+  <form id="hf-form" class="form-column" autocomplete="off">
+    <section class="card" id="patient-card">
+      <h2>Patient</h2>
+      <div class="field-grid" id="patient-fields"></div>
+    </section>
+    <!-- Clinical sections are rendered from assets/schema.js -->
+  </form>
+
+  <aside class="result-column" id="result-panel">
+    <div class="card score-card">
+      <div class="score-head">
+        <div>
+          <p class="score-label">HF Risk Score</p>
+          <p class="score-value"><span id="score-total">0</span><span class="score-denom">/100</span></p>
+        </div>
+        <div class="zone-badge" id="zone-badge">Green</div>
+      </div>
+      <div class="zone-meter" aria-hidden="true">
+        <div class="zone-meter-track">
+          <span class="seg green"></span><span class="seg yellow"></span>
+          <span class="seg orange"></span><span class="seg red"></span>
+        </div>
+        <div class="zone-marker" id="zone-marker"></div>
+        <div class="zone-scale"><span>0</span><span>25</span><span>45</span><span>65</span><span>100</span></div>
+      </div>
+      <p class="zone-summary" id="zone-summary">Low risk — stable</p>
+      <p class="completeness" id="completeness"></p>
+    </div>
+
+    <div class="card">
+      <h2>Outcome-specific risk</h2>
+      <div id="sub-risks" class="subrisk-list"></div>
+    </div>
+
+    <div class="card" id="flags-card" hidden>
+      <h2>Action points</h2>
+      <ul id="flags" class="flag-list"></ul>
+    </div>
+
+    <div class="card">
+      <h2>Domain contribution</h2>
+      <div id="domains" class="domain-list"></div>
+    </div>
+
+    <div class="card">
+      <h2>Follow-up &amp; reminder</h2>
+      <p class="followup" id="followup"></p>
+      <textarea id="reminder-text" class="reminder" rows="9" readonly></textarea>
+      <div class="reminder-actions">
+        <button type="button" id="btn-copy" class="ghost">Copy message</button>
+        <a href="#" id="btn-mail" class="ghost button-link">E-mail</a>
+      </div>
+      <p class="hint">Automated delivery (SMS / e-mail) needs a backend — this generates the message and the due date.</p>
+    </div>
+
+    <details class="card breakdown">
+      <summary>Full score breakdown</summary>
+      <div id="breakdown"></div>
+    </details>
+  </aside>
+</main>
+
+<footer class="disclaimer">
+  <strong>Not a medical device.</strong> This calculator is a structured
+  documentation and triage aid. The 100-point weighting is a transparent
+  internal scheme, not a validated published model, and it must be calibrated
+  against local outcome data before clinical use. It does not replace
+  clinical judgement.
+</footer>
+
+<script type="module" src="assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+{
+  "name": "heart-failure-risk-score",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Indian HF App — heart failure risk score calculator",
+  "type": "module",
+  "scripts": {
+    "test": "node --test 'tests/*.test.js'",
+    "serve": "python3 -m http.server 8080"
+  }
+}
